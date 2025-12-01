@@ -138,9 +138,10 @@ def load_model_and_tokenizer(
         model.denoise_model = init_adapter(model.denoise_model, model_args, finetuning_args, is_trainable, is_mergeable)
         if checkpoint_dir is not None: # for sampling
             load_path = os.path.join(checkpoint_dir[0], 'pytorch_model.bin')
+            map_loc = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
             loaded = torch.load(
                 load_path,
-                map_location=torch.device('cuda')
+                map_location=map_loc
             )
             # print(loaded.keys())
             # try:

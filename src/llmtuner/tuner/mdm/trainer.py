@@ -17,6 +17,7 @@ from llmtuner.extras.constants import IGNORE_INDEX
 from llmtuner.extras.logging import get_logger
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.nn.functional as F
+from sampling.ordered_info_gain import InfoGainSampler
 
 logger = get_logger(__name__)
 
@@ -38,6 +39,7 @@ class CustomDiffusionTrainer(Trainer):
     ):
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, tokenizer, model_init, compute_metrics, callbacks, optimizers, preprocess_logits_for_metrics)
         self.diff_args = diff_args
+        self.info_gain_sampler = None
         print(self.diff_args)
 
     def compute_loss(
@@ -166,6 +168,7 @@ class CustomDiffusionTrainer(Trainer):
         batch_size = x.size(0)
 
         init_maskable_mask = maskable_mask = ~src_mask
+        use_info_gain = getattr(self.diff_args, "use_info_gain_ordering", False)
         
         for t in range(self.diff_args.diffusion_steps-1, -1, -1): # t from T-1 to 0
             with torch.no_grad():
@@ -175,6 +178,13 @@ class CustomDiffusionTrainer(Trainer):
 
                 if verbose:
                     print(f"t={t+1}(in):", self.tokenizer.decode(xt.tolist()[0]))
+
+                if use_info_gain:
+                    sampler = self._get_info_gain_sampler()
+                    xt = sampler.greedy_decode(xt, attention_mask, src_mask, t, init_maskable_mask)
+                    if verbose:
+                        print(f"t={t+1}(out):", self.tokenizer.decode(xt.tolist()[0]))
+                    continue
 
                 t_tensor = torch.full((batch_size, ), t, device=x.device)
                 logits = self.model(xt, t_tensor, attention_mask=attention_mask)
@@ -211,6 +221,12 @@ class CustomDiffusionTrainer(Trainer):
                 else:
                     xt = x0
         return xt
+
+    def _get_info_gain_sampler(self):
+        if self.info_gain_sampler is None:
+            base_model = self.model.module if isinstance(self.model, DDP) else self.model
+            self.info_gain_sampler = InfoGainSampler(base_model, self.tokenizer, self.diff_args)
+        return self.info_gain_sampler
 
 def topk_masking(scores, cutoff_len, stochastic=False, temp=1.0):
     """

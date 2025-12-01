@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 @dataclass
 class DiffusionArguments:
@@ -32,6 +33,30 @@ class DiffusionArguments:
     topk_decoding: bool = field(
         default=False,
         metadata={"help": "use focal loss for token-level reweighting"}
+    )
+    use_info_gain_ordering: bool = field(
+        default=False,
+        metadata={"help": "Enable greedy information-gain decoding."}
+    )
+    critic_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the trained critic checkpoint (.pt)."}
+    )
+    info_gain_alpha: float = field(
+        default=1.0,
+        metadata={"help": "Confidence exponent used in utility computation."}
+    )
+    info_gain_tau_util: float = field(
+        default=0.0,
+        metadata={"help": "Utility threshold for committing a token."}
+    )
+    info_gain_tau_conf: float = field(
+        default=0.0,
+        metadata={"help": "Confidence threshold for committing a token."}
+    )
+    info_gain_budget: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional cap on the number of tokens revealed per step."}
     )
 
     def __post_init__(self):

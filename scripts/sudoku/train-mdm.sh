@@ -1,16 +1,22 @@
-export WANDB_DISABLED=true
+NUM_PROCS=${MDM_NUM_PROCESSES:-${GPUS:-8}}
+MAIN_PORT=${MDM_MASTER_PORT:-${MASTER_PORT:-20099}}
+DATASET=${MDM_DATASET:-sudoku_train}
+EVAL_DATASETS=${MDM_EVAL_DATASETS:-sudoku_test}
 
-exp=output/sudoku/mdm-alpha0.25-gamma1-bs1024-lr1e-3-ep300-T20-`date "+%Y%m%d-%H%M%S"`
-mkdir -p $exp
+if [[ -n "${MDM_EXP_DIR:-}" ]]; then
+  exp="$MDM_EXP_DIR"
+else
+  exp=output/sudoku/mdm-alpha0.25-gamma1-bs1024-lr1e-3-ep300-T20-`date "+%Y%m%d-%H%M%S"`
+fi
+mkdir -p "$exp"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-accelerate launch --multi_gpu --num_machines 1 --mixed_precision fp16 --num_processes 8 --main_process_port 20099 \
+accelerate launch --multi_gpu --num_machines 1 --mixed_precision fp16 --num_processes $NUM_PROCS --main_process_port $MAIN_PORT \
 src/train_bash.py \
     --stage mdm --overwrite_output_dir \
     --cache_dir ./cache \
     --model_name_or_path model_config_tiny \
     --do_train \
-    --dataset sudoku_train \
+    --dataset $DATASET \
     --finetuning_type full \
     --cutoff_len 164 \
     --output_dir $exp \
@@ -27,7 +33,7 @@ src/train_bash.py \
     --learning_rate 1e-3 \
     --num_train_epochs 300.0 \
     --plot_loss \
-    --run_name ${dataset}_prefix \
+    --run_name ${DATASET}_prefix \
     --preprocessing_num_workers 8 \
     --fp16 \
     --save_total_limit 1 \
@@ -39,13 +45,12 @@ src/train_bash.py \
     --topk_decoding True \
     --alpha 0.25 \
     --gamma 1 \
-    > $exp/train.log
+    | tee $exp/train.log
 
-for dataset in sudoku_test
+for dataset in $EVAL_DATASETS
 do
 topk_decoding=True
-mkdir $exp/$dataset
-CUDA_VISIBLE_DEVICES=1  \
+mkdir -p $exp/$dataset
 python3 -u src/train_bash.py \
     --stage mdm --overwrite_output_dir \
     --cache_dir ./cache \
@@ -60,5 +65,5 @@ python3 -u src/train_bash.py \
     --remove_unused_columns False \
     --decoding_strategy stochastic0.5-linear \
     --topk_decoding $topk_decoding \
-    > $exp/${dataset}/eval-TopK$topk_decoding.log
+    | tee $exp/${dataset}/eval-TopK$topk_decoding.log
 done

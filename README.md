@@ -27,6 +27,15 @@ pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable
 ## Usage
 Training and evaluation commands are provided under the `scripts` directory. Download data from [here](https://drive.google.com/file/d/1b0OIlYL76rVVuNYIfIb-L_Ptdg6k_y0c/view?usp=sharing) first.
 The synthetic planning dataset can also be generated using `data/synthetic_graph.py` script.
+
+To stream metrics to Weights & Biases instead of the old disabled default, make sure the relevant environment variables are set before launching:
+
+```
+export WANDB_API_KEY=xxxxxxx
+export WANDB_PROJECT=diffusion-vs-ar
+export WANDB_DIR=/share/.../wandb   # optional cache location
+```
+
 ```
 # run AR (training from scratch)
 bash scripts/sudoku/train-sft.sh
@@ -49,6 +58,39 @@ For experiment on different datasets, change `--dataset` (dataset name in `data/
 | max_new_tokens (sft) | 24               |          24 |          32 |          54 |     82 |       10 |       14 |       18 |
 
 Please refer to Appendix C.2 for other illustraion of implementation details.
+
+## Information-Gain Critic & Ordered Decoding
+
+1. **Stage 1:** Train the diffusion model as usual (see commands above) and keep the checkpoint.
+2. **Stage 2:** Fit the critic with the frozen denoiser:
+
+```bash
+python training/train_critic.py \
+  --stage mdm \
+  --model_name_or_path model_config_tiny \
+  --dataset sudoku_train \
+  --cutoff_len 164 \
+  --do_train \
+  --output_dir output/sudoku/critic \
+  --learning_rate 1e-4 \
+  --num_train_epochs 20 \
+  --per_device_train_batch_size 16
+```
+
+The script saves `info_gain_critic.pt`, which contains the critic weights and feature configuration.
+Use the same stage-1 test split for evaluation (e.g., rerun with `--dataset sudoku_test` or via `scripts/sudoku/eval_mdm.sbatch`) and drop the legacy `critic_{train,test}` CSVs.
+
+3. **Inference:** Enable greedy information-gain decoding with the trained critic by adding
+
+```
+--use_info_gain_ordering \
+--critic_checkpoint output/sudoku/critic/info_gain_critic.pt \
+--info_gain_alpha 0.5 \
+--info_gain_tau_util 0.0 \
+--info_gain_tau_conf 0.0
+```
+
+to the usual diffusion sampling command. The sampler loads the critic and greedily reveals tokens based on predicted utility while respecting the readiness thresholds.
 
 ## Citation
 If you find our code or data helpful, please cite us as follows 
