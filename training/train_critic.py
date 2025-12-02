@@ -25,6 +25,9 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from transformers import HfArgumentParser, Seq2SeqTrainingArguments, set_seed
 
@@ -100,7 +103,7 @@ class CriticTrainingArguments:
         return tuple(int(p) for p in parts)
 
 
-def build_dataloader(dataset, training_args: Seq2SeqTrainingArguments, shuffle: bool = True) -> DataLoader:
+def build_dataloader(dataset, training_args: Seq2SeqTrainingArguments, shuffle: bool = True, sampler=None) -> DataLoader:
     columns = ["input_ids", "attention_mask", "src_mask"]
     dataset.set_format(type="torch", columns=columns)
     batch_size = (
@@ -111,7 +114,8 @@ def build_dataloader(dataset, training_args: Seq2SeqTrainingArguments, shuffle: 
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
     )
 
 
@@ -176,6 +180,8 @@ def evaluate_critic(
     critic_args,
     device: torch.device,
     feature_cfg: FeatureExtractorConfig,
+    world_size: int = 1,
+    rank: int = 0,
 ) -> Optional[Dict[str, float]]:
     if dataloader is None:
         return None
@@ -313,7 +319,65 @@ def evaluate_critic(
     if total_count == 0:
         return None
 
-    mean_loss = total_loss / total_count
+    if dist.is_initialized():
+        payload = (
+            all_preds,
+            all_targets,
+            candidate_timesteps_all,
+            candidate_mask_ratios_all,
+            low_bucket_preds,
+            low_bucket_targets,
+            high_bucket_preds,
+            high_bucket_targets,
+            total_loss,
+            total_count,
+            group_matches,
+            group_total,
+            topk_matches,
+            predicted_top_true_gain_sum,
+        )
+        gathered = [None for _ in range(world_size)]
+        dist.all_gather_object(gathered, payload)
+
+        all_preds, all_targets = [], []
+        candidate_timesteps_all, candidate_mask_ratios_all = [], []
+        low_bucket_preds, low_bucket_targets = [], []
+        high_bucket_preds, high_bucket_targets = [], []
+        total_loss = total_count = group_matches = group_total = topk_matches = 0.0
+        predicted_top_true_gain_sum = 0.0
+
+        for (
+            preds_i,
+            targets_i,
+            t_i,
+            mr_i,
+            low_p_i,
+            low_t_i,
+            high_p_i,
+            high_t_i,
+            loss_i,
+            count_i,
+            gm_i,
+            gt_i,
+            topk_i,
+            gain_i,
+        ) in gathered:
+            all_preds.extend(preds_i)
+            all_targets.extend(targets_i)
+            candidate_timesteps_all.extend(t_i)
+            candidate_mask_ratios_all.extend(mr_i)
+            low_bucket_preds.extend(low_p_i)
+            low_bucket_targets.extend(low_t_i)
+            high_bucket_preds.extend(high_p_i)
+            high_bucket_targets.extend(high_t_i)
+            total_loss += loss_i
+            total_count += count_i
+            group_matches += gm_i
+            group_total += gt_i
+            topk_matches += topk_i
+            predicted_top_true_gain_sum += gain_i
+
+    mean_loss = total_loss / total_count if total_count > 0 else 0.0
     preds_arr = np.array(all_preds)
     targets_arr = np.array(all_targets)
     corr = _safe_pearsonr(preds_arr, targets_arr)
@@ -352,10 +416,21 @@ def evaluate_critic(
         "eval_corr_pred_delta_low_t": low_corr,
         "eval_corr_pred_delta_high_t": high_corr,
     }
+    # Only rank 0 returns metrics in distributed mode
+    if dist.is_initialized() and rank != 0:
+        return None
     return metrics
 
 
 def main():
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    use_dist = local_rank != -1
+
+    if use_dist and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+
     parser = HfArgumentParser(
         (
             ModelArguments,
@@ -379,7 +454,7 @@ def main():
     if isinstance(report_to, str):
         report_to = [report_to]
     use_wandb = wandb is not None and report_to and "wandb" in report_to
-    if use_wandb:
+    if use_wandb and (not use_dist or dist.get_rank() == 0):
         run_name = os.path.basename(training_args.output_dir.rstrip("/")) or "critic-train"
         wandb.init(
             project=os.getenv("WANDB_PROJECT", "diffusion-vs-ar"),
@@ -404,7 +479,10 @@ def main():
         is_trainable=False,
         diffusion_args=diffusion_args,
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if use_dist:
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 
@@ -422,8 +500,11 @@ def main():
     if train_dataset is None:
         raise ValueError("training dataset is required for critic fitting.")
 
-    dataloader = build_dataloader(train_dataset, training_args, shuffle=True)
-    eval_dataloader = build_dataloader(eval_dataset, training_args, shuffle=False) if eval_dataset is not None else None
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=dist.get_rank()) if use_dist else None
+    eval_sampler = DistributedSampler(eval_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=False) if (use_dist and eval_dataset is not None) else None
+
+    dataloader = build_dataloader(train_dataset, training_args, shuffle=True, sampler=train_sampler)
+    eval_dataloader = build_dataloader(eval_dataset, training_args, shuffle=False, sampler=eval_sampler) if eval_dataset is not None else None
     critic_config: Optional[CriticConfig] = None
     critic: Optional[InfoGainCritic] = None
     optimizer: Optional[AdamW] = None
@@ -441,8 +522,26 @@ def main():
     gradient_accumulation = max(1, training_args.gradient_accumulation_steps)
     os.makedirs(training_args.output_dir, exist_ok=True)
 
+    def save_checkpoint(base_name: str):
+        if critic is None:
+            return
+        state = {
+            "critic_state_dict": critic.module.state_dict() if isinstance(critic, DDP) else critic.state_dict(),
+            "critic_config": critic_config.__dict__,
+            "feature_config": feature_cfg.__dict__,
+        }
+        pt_path = os.path.join(training_args.output_dir, f"{base_name}.pt")
+        cfg_path = os.path.join(training_args.output_dir, f"{base_name}_config.json")
+        torch.save(state, pt_path)
+        with open(cfg_path, "w") as f:
+            json.dump(state["critic_config"], f, indent=2)
+        print(f"Saved critic checkpoint to {pt_path}")
+
     for epoch in range(math.ceil(training_args.num_train_epochs)):
-        progress = tqdm(dataloader, desc=f"epoch {epoch+1}")
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        iter_data = dataloader
+        progress = tqdm(iter_data, desc=f"epoch {epoch+1}") if (not use_dist or dist.get_rank() == 0) else iter_data
         optimizer.zero_grad(set_to_none=True) if optimizer else None
         for batch in progress:
             x0 = batch["input_ids"].to(device)
@@ -481,6 +580,13 @@ def main():
                     dropout=critic_args.critic_dropout,
                 )
                 critic = InfoGainCritic(critic_config).to(device)
+                if use_dist:
+                    critic = DDP(
+                        critic,
+                        device_ids=[local_rank] if device.type == "cuda" else None,
+                        output_device=local_rank if device.type == "cuda" else None,
+                        broadcast_buffers=False,
+                    )
                 optimizer = AdamW(
                     critic.parameters(),
                     lr=training_args.learning_rate,
@@ -538,8 +644,9 @@ def main():
 
             global_step += 1
             if critic_args.log_interval > 0 and global_step % critic_args.log_interval == 0:
-                progress.set_postfix({"critic_loss": loss.item()})
-                if use_wandb:
+                if not use_dist or dist.get_rank() == 0:
+                    progress.set_postfix({"critic_loss": loss.item()})
+                if use_wandb and (not use_dist or dist.get_rank() == 0):
                     all_targets = torch.stack(batch_targets)
                     target_min = float(all_targets.min().item())
                     target_max = float(all_targets.max().item())
@@ -583,28 +690,28 @@ def main():
                     critic_args,
                     device,
                     feature_cfg,
+                    world_size=world_size,
+                    rank=dist.get_rank() if use_dist else 0,
                 )
-                if metrics:
+                if metrics and (not use_dist or dist.get_rank() == 0):
                     progress.write(f"Eval metrics: {metrics}")
-                    if use_wandb:
+                    if use_wandb and (not use_dist or dist.get_rank() == 0):
                         wandb.log(metrics, step=global_step)
 
-        if use_wandb:
+        if use_wandb and (not use_dist or dist.get_rank() == 0):
             wandb.log({"train/epoch": epoch + 1}, step=global_step)
 
-    if critic is not None:
+        if not use_dist or dist.get_rank() == 0:
+            job_suffix = os.environ.get("SLURM_JOB_ID")
+            epoch_base = f"info_gain_critic_epoch{epoch+1}"
+            if job_suffix:
+                epoch_base = f"{epoch_base}_{job_suffix}"
+            save_checkpoint(epoch_base)
+
+    if critic is not None and (not use_dist or dist.get_rank() == 0):
         job_suffix = os.environ.get("SLURM_JOB_ID")
         base_name = f"info_gain_critic_{job_suffix}" if job_suffix else "info_gain_critic"
-        state = {
-            "critic_state_dict": critic.state_dict(),
-            "critic_config": critic_config.__dict__,
-            "feature_config": feature_cfg.__dict__,
-        }
-        output_path = os.path.join(training_args.output_dir, f"{base_name}.pt")
-        torch.save(state, output_path)
-        with open(os.path.join(training_args.output_dir, f"{base_name}_config.json"), "w") as f:
-            json.dump(state["critic_config"], f, indent=2)
-        print(f"Saved critic checkpoint to {output_path}")
+        save_checkpoint(base_name)
     else:
         print("No critic was trained. Check if the dataset produces masked tokens.")
 
@@ -618,13 +725,15 @@ def main():
             critic_args,
             device,
             feature_cfg,
+            world_size=world_size,
+            rank=dist.get_rank() if use_dist else 0,
         )
-        if metrics:
+        if metrics and (not use_dist or dist.get_rank() == 0):
             print(f"Final eval metrics: {metrics}")
             if use_wandb:
                 wandb.log(metrics, step=global_step if global_step > 0 else None)
 
-    if use_wandb:
+    if use_wandb and (not use_dist or dist.get_rank() == 0):
         wandb.finish()
 
 

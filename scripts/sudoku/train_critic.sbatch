@@ -3,10 +3,9 @@
 #SBATCH --partition=gpu
 # SBATCH --exclude=portal-compute-02
 # SBATCH --exclude=elor-compute-02
-# SBATCH --constraint=gpu-high
-# SBATCH --gres=gpu:nvidia_rtx_6000_ada_generation:1
-#SBATCH --gres=gpu:nvidia_a100_80gb_pcie:1
-# SBATCH --gres=gpu:1
+#SBATCH --constraint=gpu-high
+# SBATCH --gres=gpu:nvidia_a100_80gb_pcie:8
+#SBATCH --gres=gpu:4
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@180
 #SBATCH -N 1
@@ -51,7 +50,14 @@ wandb login --relogin "$WANDB_API_KEY" >/dev/null 2>&1 || true
 cd "$REPO_DIR"
 export PYTHONPATH="$REPO_DIR/src:${PYTHONPATH:-}"
 
-python training/train_critic.py \
+GPUS=$(nvidia-smi -L | wc -l | tr -d ' ')
+NUM_PROCS=${CRITIC_NUM_PROCS:-4}
+if [[ "$NUM_PROCS" -gt "$GPUS" ]]; then
+  NUM_PROCS="$GPUS"
+fi
+MASTER_PORT=${MASTER_PORT:-$((20000 + (RANDOM % 20000)))}
+
+torchrun --nproc_per_node "$NUM_PROCS" --master_port "$MASTER_PORT" training/train_critic.py \
   --stage mdm \
   --model_name_or_path model_config_tiny \
   --checkpoint_dir "$CHECKPOINT_DIR" \
@@ -64,8 +70,8 @@ python training/train_critic.py \
   --diffusion_steps 20 \
   --val_size ${CRITIC_VAL_SIZE:-1000} \
   --output_dir "$OUTPUT_DIR" \
-  --per_device_train_batch_size ${CRITIC_BATCH_SIZE:-16} \
-  --per_device_eval_batch_size ${CRITIC_EVAL_BATCH_SIZE:-16} \
+  --per_device_train_batch_size ${CRITIC_BATCH_SIZE:-64} \
+  --per_device_eval_batch_size ${CRITIC_EVAL_BATCH_SIZE:-64} \
   --gradient_accumulation_steps ${CRITIC_GRAD_ACC:-1} \
   --learning_rate ${CRITIC_LR:-1e-4} \
   --num_train_epochs ${CRITIC_EPOCHS:-20} \
