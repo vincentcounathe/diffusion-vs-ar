@@ -2,6 +2,7 @@
 #SBATCH --job-name=mdm-infer-baseline
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
+#SBATCH --constraint=gpu-high
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH -t 06:00:00
@@ -11,8 +12,10 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/share/sds/vc383/code/diffusion-vs-ar}"
 ENV_PATH="${ENV_PATH:-/share/sds/vc383/envs/diffusion}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-/share/sds/vc383/scratch_diffusion-vs-ar/sudoku-mdm/checkpoints/sudoku-mdm-base}"
+# TEST_DATASET="${TEST_DATASET:-sudoku_test}"
 TEST_DATASET="${TEST_DATASET:-critic_test_shah}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/critic_eval_shah/base}"
+# OUTPUT_DIR="${OUTPUT_DIR:-output/sudoku_eval/base-topk}"
+OUTPUT_DIR="${OUTPUT_DIR:-output/critic_eval_shah/base-topk}"
 WANDB_ROOT="${WANDB_ROOT:-/share/sds/vc383/scratch_diffusion-vs-ar/critic/wandb}"
 HF_ROOT="${HF_ROOT:-/share/sds/vc383/cache/hf}"
 TMP_ROOT="${TMP_ROOT:-/share/sds/vc383/tmp}"

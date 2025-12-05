@@ -2,6 +2,7 @@
 #SBATCH --job-name=mdm-infer-critic
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
+#SBATCH --constraint=gpu-high
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH -t 06:00:00
@@ -11,8 +12,10 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/share/sds/vc383/code/diffusion-vs-ar}"
 ENV_PATH="${ENV_PATH:-/share/sds/vc383/envs/diffusion}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-/share/sds/vc383/scratch_diffusion-vs-ar/sudoku-mdm/checkpoints/sudoku-mdm-base}"
-CRITIC_CKPT="${CRITIC_CKPT:-output/critic/info_gain_critic.pt}"
+CRITIC_CKPT="${CRITIC_CKPT:-output/critic/info_gain_critic_epoch13_551687_best.pt}"
+# TEST_DATASET="${TEST_DATASET:-sudoku_test}"
 TEST_DATASET="${TEST_DATASET:-critic_test_shah}"
+# OUTPUT_DIR="${OUTPUT_DIR:-output/sudoku_eval/info_gain}"
 OUTPUT_DIR="${OUTPUT_DIR:-output/critic_eval_shah/info_gain}"
 WANDB_ROOT="${WANDB_ROOT:-/share/sds/vc383/scratch_diffusion-vs-ar/critic/wandb}"
 HF_ROOT="${HF_ROOT:-/share/sds/vc383/cache/hf}"
@@ -50,7 +53,7 @@ python src/train_bash.py \
   --decoding_strategy deterministic-linear \
   --use_info_gain_ordering \
   --critic_checkpoint "$CRITIC_CKPT" \
-  --info_gain_alpha 1.0 \
+  --info_gain_alpha 1.5 \
   --info_gain_tau_util 0.0 \
   --info_gain_tau_conf 0.0 \
   --report_to wandb

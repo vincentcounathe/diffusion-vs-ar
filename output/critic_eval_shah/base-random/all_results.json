@@ -1,0 +1,7 @@
+{
+    "predict_acc": 0.001,
+    "predict_loss": 0.00993372406810522,
+    "predict_runtime": 18.0025,
+    "predict_samples_per_second": 55.548,
+    "predict_steps_per_second": 6.943
+}
